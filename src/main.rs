@@ -167,11 +167,67 @@ async fn listen_to_station(node_id_str: String, duration: Option<u64>) -> anyhow
 
     let rpc_client = zel_core::protocol::client::RpcClient::new(connection).await?;
     let radio_client = RadioServiceClient::new(rpc_client);
-    let listener = RadioListener::new(radio_client);
 
+    // Show initial station info
+    let listener = RadioListener::new(radio_client.clone());
     listener.get_station_info().await?;
-    listener.listen(duration).await?;
 
+    // Start listening in background task
+    let listen_task = tokio::spawn(async move {
+        if let Err(e) = listener.listen(duration).await {
+            eprintln!("Listen error: {}", e);
+        }
+    });
+
+    // Interactive command loop
+    println!("Commands: 'info' (station info), 'quit' (exit)");
+    println!("Type command and press Enter:\n");
+
+    let stdin = tokio::io::stdin();
+    let mut reader = tokio::io::BufReader::new(stdin);
+    let mut line = String::new();
+
+    loop {
+        use tokio::io::AsyncBufReadExt;
+
+        line.clear();
+        print!("> ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                let cmd = line.trim();
+                match cmd {
+                    "info" => match radio_client.get_info().await {
+                        Ok(info) => {
+                            println!("\n=== Station Info ===");
+                            println!("Name: {}", info.name);
+                            println!("Listeners: {}", info.listeners);
+                            println!("====================\n");
+                        }
+                        Err(e) => eprintln!("Error: {}", e),
+                    },
+                    "quit" | "exit" => {
+                        println!("Disconnecting...");
+                        break;
+                    }
+                    "" => {} // Empty line, ignore
+                    _ => {
+                        println!("Unknown command: '{}'. Try 'info' or 'quit'", cmd);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Error reading input: {}", e);
+                break;
+            }
+        }
+    }
+
+    // Stop listening task
+    listen_task.abort();
     println!("\nDisconnected.");
     Ok(())
 }
