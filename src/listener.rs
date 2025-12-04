@@ -1,5 +1,6 @@
 use log::info;
-use std::io::Cursor;
+use std::io::{Cursor, Read};
+use std::sync::{Arc, Mutex};
 use vorbis_rs::VorbisDecoder;
 
 use crate::service::RadioServiceClient;
@@ -32,31 +33,16 @@ impl RadioListener {
     pub async fn listen(&self, duration_secs: Option<u64>) -> anyhow::Result<()> {
         info!("[Listener] Connecting...");
 
-        let (_send, mut recv) = self.client.listen().await?;
+        let (_send, recv) = self.client.listen().await?;
 
-        info!("[Listener] Stream opened, buffering...");
+        info!("[Listener] Stream opened, creating async reader...");
 
-        // Buffer incoming OGG data
-        let mut ogg_buffer = Vec::new();
-        let mut chunk = vec![0u8; 8192];
+        // Create a bridge between async RecvStream and sync Read for VorbisDecoder
+        let recv_wrapper = Arc::new(Mutex::new(recv));
+        let sync_reader = SyncStreamReader::new(recv_wrapper);
 
-        // Collect minimum buffer
-        const MIN_BUFFER_SIZE: usize = 32768;
-        while ogg_buffer.len() < MIN_BUFFER_SIZE {
-            match recv.read(&mut chunk).await? {
-                None => return Err(anyhow::anyhow!("Stream ended early")),
-                Some(n) => ogg_buffer.extend_from_slice(&chunk[..n]),
-            }
-        }
-
-        info!(
-            "[Listener] Decoding ({} bytes buffered)...",
-            ogg_buffer.len()
-        );
-
-        // Create decoder
-        let cursor = Cursor::new(ogg_buffer.clone());
-        let mut decoder = VorbisDecoder::new(cursor)?;
+        // Create decoder with the sync reader
+        let mut decoder = VorbisDecoder::new(sync_reader)?;
 
         let sample_rate = decoder.sampling_frequency().get();
         let channels = decoder.channels().get();
@@ -65,31 +51,13 @@ impl RadioListener {
         #[cfg(feature = "playback")]
         {
             let mut player = AudioPlayer::new(sample_rate, channels)?;
+            info!("[Listener] Playing...");
 
-            // Decode and play initial buffer
+            let start = std::time::Instant::now();
+
+            // Decode and play
             while let Some(samples) = decoder.decode_audio_block()? {
                 player.play_samples(samples.samples())?;
-            }
-
-            info!("[Listener] Playing live stream...");
-
-            // Continue streaming
-            let start = std::time::Instant::now();
-            loop {
-                match recv.read(&mut chunk).await? {
-                    None => break,
-                    Some(n) => {
-                        ogg_buffer.extend_from_slice(&chunk[..n]);
-
-                        // Try decoding accumulated data
-                        let cursor = Cursor::new(ogg_buffer.clone());
-                        if let Ok(mut new_decoder) = VorbisDecoder::new(cursor) {
-                            while let Some(samples) = new_decoder.decode_audio_block()? {
-                                player.play_samples(samples.samples())?;
-                            }
-                        }
-                    }
-                }
 
                 if let Some(max) = duration_secs {
                     if start.elapsed().as_secs() >= max {
@@ -103,21 +71,13 @@ impl RadioListener {
 
         #[cfg(not(feature = "playback"))]
         {
-            info!("[Listener] Playback disabled, consuming stream silently");
+            info!("[Listener] Playback disabled, counting samples...");
 
             let mut total_samples = 0;
+            let start = std::time::Instant::now();
+
             while let Some(samples) = decoder.decode_audio_block()? {
                 total_samples += samples.samples()[0].len();
-            }
-
-            // Keep connection alive
-            let start = std::time::Instant::now();
-            loop {
-                match recv.read(&mut chunk).await {
-                    Ok(None) => break,
-                    Ok(Some(_)) => {}
-                    Err(_) => break,
-                }
 
                 if let Some(max) = duration_secs {
                     if start.elapsed().as_secs() >= max {
@@ -130,5 +90,34 @@ impl RadioListener {
         }
 
         Ok(())
+    }
+}
+
+/// Bridges async RecvStream to sync Read for VorbisDecoder
+struct SyncStreamReader {
+    recv: Arc<Mutex<iroh::endpoint::RecvStream>>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl SyncStreamReader {
+    fn new(recv: Arc<Mutex<iroh::endpoint::RecvStream>>) -> Self {
+        Self {
+            recv,
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+impl Read for SyncStreamReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Block on async read
+        self.runtime.block_on(async {
+            let mut recv = self.recv.lock().unwrap();
+            match recv.read(buf).await {
+                Ok(Some(n)) => Ok(n),
+                Ok(None) => Ok(0), // EOF
+                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            }
+        })
     }
 }
