@@ -10,7 +10,7 @@ use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 
-use crate::service::{RadioServiceServer, StationInfo};
+use crate::service::{ChatMessage, RadioServiceServer, StationInfo};
 use zel_core::protocol::RequestContext;
 
 type AudioBlock = Vec<Vec<f32>>;
@@ -22,6 +22,7 @@ pub struct RadioBroadcaster {
     sample_rate: u32,
     channels: u8,
     pcm_broadcast_tx: broadcast::Sender<AudioBlock>, // Broadcast PCM audio blocks
+    chat_broadcast_tx: broadcast::Sender<ChatMessage>, // Broadcast chat messages
     listener_count: Arc<AtomicUsize>,
 }
 
@@ -36,12 +37,16 @@ impl RadioBroadcaster {
         let (pcm_broadcast_tx, _) = broadcast::channel(100);
         let tx_clone = pcm_broadcast_tx.clone();
 
+        // Broadcast channel for chat messages
+        let (chat_broadcast_tx, _) = broadcast::channel(100);
+
         let broadcaster = Self {
             station_name: name.into(),
             station_desc: desc.into(),
             sample_rate,
             channels,
             pcm_broadcast_tx,
+            chat_broadcast_tx,
             listener_count: Arc::new(AtomicUsize::new(0)),
         };
 
@@ -60,6 +65,39 @@ impl RadioServiceServer for RadioBroadcaster {
             channels: self.channels,
             listeners: self.listener_count.load(Ordering::Relaxed),
         })
+    }
+
+    async fn send_chat(&self, _ctx: RequestContext, message: String) -> Result<(), String> {
+        use std::time::SystemTime;
+
+        let chat = ChatMessage {
+            listener_id: self.listener_count.load(Ordering::Relaxed),
+            message,
+            timestamp: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        // Broadcast to all chat subscribers
+        let _ = self.chat_broadcast_tx.send(chat);
+        Ok(())
+    }
+
+    async fn chat_stream(
+        &self,
+        _ctx: RequestContext,
+        mut sink: crate::service::RadioServiceChatStreamSink,
+    ) -> Result<(), String> {
+        let mut chat_rx = self.chat_broadcast_tx.subscribe();
+
+        while let Ok(msg) = chat_rx.recv().await {
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     async fn listen(

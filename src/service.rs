@@ -11,11 +11,23 @@ pub struct StationInfo {
     pub listeners: usize,
 }
 
-// No StreamRequest needed - all listeners get same quality
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub listener_id: usize,
+    pub message: String,
+    pub timestamp: u64,
+}
+
 #[zel_service(name = "radio")]
 pub trait RadioService {
     #[method(name = "info")]
     async fn get_info(&self) -> Result<StationInfo, String>;
+
+    #[method(name = "send_chat")]
+    async fn send_chat(&self, message: String) -> Result<(), String>;
+
+    #[subscription(name = "chat_stream", item = "ChatMessage")]
+    async fn chat_stream(&self) -> Result<(), String>;
 
     #[stream(name = "listen")]
     async fn listen(&self) -> Result<(), String>;

@@ -179,8 +179,31 @@ async fn listen_to_station(node_id_str: String, duration: Option<u64>) -> anyhow
         }
     });
 
+    // Subscribe to chat stream
+    use futures::StreamExt;
+    let mut chat_stream = radio_client.chat_stream().await?;
+    tokio::spawn(async move {
+        while let Some(result) = chat_stream.next().await {
+            match result {
+                Ok(chat) => {
+                    println!("\r[Listener {}]: {}", chat.listener_id, chat.message);
+                    print!("> ");
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                }
+                Err(e) => {
+                    eprintln!("Chat error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
     // Interactive command loop
-    println!("Commands: 'info' (station info), 'quit' (exit)");
+    println!("Commands:");
+    println!("  'info'            - Show station info");
+    println!("  'chat <message>'  - Send chat message");
+    println!("  'quit'            - Exit");
     println!("Type command and press Enter:\n");
 
     let stdin = tokio::io::stdin();
@@ -199,23 +222,35 @@ async fn listen_to_station(node_id_str: String, duration: Option<u64>) -> anyhow
             Ok(0) => break, // EOF
             Ok(_) => {
                 let cmd = line.trim();
-                match cmd {
-                    "info" => match radio_client.get_info().await {
-                        Ok(info) => {
-                            println!("\n=== Station Info ===");
-                            println!("Name: {}", info.name);
-                            println!("Listeners: {}", info.listeners);
-                            println!("====================\n");
-                        }
-                        Err(e) => eprintln!("Error: {}", e),
-                    },
-                    "quit" | "exit" => {
-                        println!("Disconnecting...");
-                        break;
+
+                if cmd.starts_with("chat ") {
+                    let message = cmd.strip_prefix("chat ").unwrap().to_string();
+                    match radio_client.send_chat(message).await {
+                        Ok(_) => {} // Message sent
+                        Err(e) => eprintln!("Error sending chat: {}", e),
                     }
-                    "" => {} // Empty line, ignore
-                    _ => {
-                        println!("Unknown command: '{}'. Try 'info' or 'quit'", cmd);
+                } else {
+                    match cmd {
+                        "info" => match radio_client.get_info().await {
+                            Ok(info) => {
+                                println!("\n=== Station Info ===");
+                                println!("Name: {}", info.name);
+                                println!("Listeners: {}", info.listeners);
+                                println!("====================\n");
+                            }
+                            Err(e) => eprintln!("Error: {}", e),
+                        },
+                        "quit" | "exit" => {
+                            println!("Disconnecting...");
+                            break;
+                        }
+                        "" => {} // Empty line, ignore
+                        _ => {
+                            println!(
+                                "Unknown command: '{}'. Try 'info', 'chat <message>', or 'quit'",
+                                cmd
+                            );
+                        }
                     }
                 }
             }

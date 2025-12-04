@@ -13,6 +13,7 @@ symphonia = { version = "0.5.5", features = ["all"] }
 
 # Async runtime
 tokio = { version = "1.48", features = ["full", "sync"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 async-trait = "0.1"
 
