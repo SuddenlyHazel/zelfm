@@ -131,12 +131,22 @@ impl RadioServiceServer for RadioBroadcaster {
             .map_err(|e| format!("Encoder build: {}", e))?;
 
             // Encode PCM blocks as they arrive
+            info!("[Encoder {}] Starting encoding loop", listener_id);
+            let mut block_count = 0;
             while let Ok(pcm_block) = pcm_rx.blocking_recv() {
+                block_count += 1;
+                if block_count % 100 == 0 {
+                    info!("[Encoder {}] Encoded {} blocks", listener_id, block_count);
+                }
                 if let Err(e) = encoder.encode_audio_block(&pcm_block) {
-                    error!("Encoding error: {}", e);
+                    error!("[Encoder {}] Encoding error: {}", listener_id, e);
                     break;
                 }
             }
+            info!(
+                "[Encoder {}] Encoding loop ended, total blocks: {}",
+                listener_id, block_count
+            );
 
             // Finish encoder
             let _ = encoder.finish();

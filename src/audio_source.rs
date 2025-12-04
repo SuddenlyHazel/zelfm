@@ -25,6 +25,10 @@ impl FileSource {
 
 impl AudioSource for FileSource {
     fn start(self, pcm_tx: broadcast::Sender<AudioBlock>) -> anyhow::Result<()> {
+        info!(
+            "[FileSource] Starting file decoder for: {}",
+            self.path.display()
+        );
         file_decode_loop(&self.path, pcm_tx)
     }
 }
@@ -42,23 +46,27 @@ fn file_decode_loop(
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
-    loop {
-        // Check if channel is closed (no receivers = shutdown)
-        if pcm_tx.receiver_count() == 0 {
-            info!("[File] No listeners, shutting down...");
-            break;
-        }
+    info!("[File] Starting decode loop for: {}", file_path.display());
 
-        info!("[File] Decoding: {}", file_path.display());
+    loop {
+        info!("[File] Decoding iteration starting...");
 
         match decode_file_once(file_path, &pcm_tx) {
-            Ok(_) => info!("[File] Complete, looping..."),
+            Ok(true) => {
+                info!("[File] Decode complete, looping...");
+            }
+            Ok(false) => {
+                info!("[File] Channel closed, shutting down...");
+                break;
+            }
             Err(e) => {
-                error!("[File] Error: {}", e);
+                error!("[File] Decode error: {}", e);
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         }
     }
+
+    info!("[File] Decode loop exited");
 
     Ok(())
 }
@@ -66,7 +74,7 @@ fn file_decode_loop(
 fn decode_file_once(
     file_path: &PathBuf,
     pcm_tx: &broadcast::Sender<AudioBlock>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     use std::fs::File;
     use symphonia::core::audio::SampleBuffer;
     use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -104,10 +112,12 @@ fn decode_file_once(
     let track_id = track.id;
     let codec_params = &track.codec_params;
 
+    let detected_rate = codec_params.sample_rate.unwrap_or(44100);
+    let detected_channels = codec_params.channels.map(|c| c.count()).unwrap_or(2);
+
     info!(
-        "[File] Format: {} Hz, {} ch",
-        codec_params.sample_rate.unwrap_or(44100),
-        codec_params.channels.map(|c| c.count()).unwrap_or(2)
+        "[File] Detected format: {} Hz, {} ch",
+        detected_rate, detected_channels
     );
 
     let mut decoder =
@@ -117,12 +127,6 @@ fn decode_file_once(
     let mut audio_spec = None;
 
     loop {
-        // Check for shutdown every iteration
-        if pcm_tx.receiver_count() == 0 {
-            info!("[File] No listeners, stopping decode");
-            return Ok(());
-        }
-
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -160,11 +164,15 @@ fn decode_file_once(
                 planar[i % num_channels].push(sample);
             }
 
-            let _ = pcm_tx.send(planar);
+            // Check if send fails (channel closed = shutdown)
+            if pcm_tx.send(planar).is_err() {
+                info!("[File] Channel closed during decode");
+                return Ok(false);
+            }
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 // ============================================================================
