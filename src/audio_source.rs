@@ -204,6 +204,12 @@ impl AudioSource for LiveSource {
                     planar[i % channels].push(sample);
                 }
 
+                // Upmix mono to stereo if needed (broadcaster expects 2 channels)
+                if channels == 1 && planar.len() == 1 {
+                    let mono_channel = planar[0].clone();
+                    planar.push(mono_channel); // Duplicate for stereo
+                }
+
                 // Broadcast to all listeners
                 let _ = pcm_tx.send(planar);
             },
