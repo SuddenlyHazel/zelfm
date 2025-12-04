@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use log::info;
 use std::time::Duration;
 
@@ -8,16 +8,21 @@ use zel_core::IrohBundle;
 mod audio_player;
 mod audio_source;
 mod broadcaster;
+mod devices;
 mod listener;
 mod service;
 
+use audio_source::{AudioSource, FileSource};
 use broadcaster::RadioBroadcaster;
 use listener::RadioListener;
 use service::{RadioServiceClient, RadioServiceServer};
 
+#[cfg(feature = "live-input")]
+use audio_source::LiveSource;
+
 #[derive(Parser)]
 #[command(name = "zelfm")]
-#[command(about = "P2P Internet Radio - Simplified Architecture")]
+#[command(about = "P2P Internet Radio - File & Live Streaming")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -31,10 +36,13 @@ enum Commands {
         #[arg(short, long, default_value = "ZelFM Demo")]
         name: String,
 
-        /// OGG Vorbis audio file to broadcast (will loop)
-        #[arg(short, long)]
-        file: String,
+        #[command(flatten)]
+        source: AudioSourceArgs,
     },
+
+    /// List available input devices
+    #[cfg(feature = "live-input")]
+    ListDevices,
 
     /// Listen to a radio station
     Listen {
@@ -48,34 +56,72 @@ enum Commands {
     },
 }
 
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct AudioSourceArgs {
+    /// Audio file to broadcast (loops)
+    #[arg(short, long)]
+    file: Option<String>,
+
+    /// Live input device name (partial match, use list-devices to see options)
+    #[cfg(feature = "live-input")]
+    #[arg(short, long)]
+    input: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Broadcast { name, file } => broadcast_station(name, file).await?,
+        Commands::Broadcast { name, source } => broadcast_station(name, source).await?,
+
+        #[cfg(feature = "live-input")]
+        Commands::ListDevices => {
+            devices::list_input_devices()?;
+        }
+
         Commands::Listen { node_id, duration } => listen_to_station(node_id, duration).await?,
     }
 
     Ok(())
 }
 
-async fn broadcast_station(name: String, file_path: String) -> anyhow::Result<()> {
+async fn broadcast_station(name: String, source: AudioSourceArgs) -> anyhow::Result<()> {
     println!("=== ZelFM Broadcaster ===\n");
 
     // Create broadcaster
     let (broadcaster, pcm_tx) = RadioBroadcaster::new(
         name.clone(),
-        format!("Broadcasting {}", file_path),
-        44100, // 44.1 kHz
-        2,     // Stereo
+        "Live P2P Radio Stream",
+        44100, // Target: 44.1 kHz
+        2,     // Target: Stereo
     );
 
-    // Start audio decoder thread
-    let file_clone = file_path.clone();
+    // Determine and start audio source
     std::thread::spawn(move || {
-        if let Err(e) = audio_source::audio_decode_loop(&file_clone, pcm_tx) {
+        let result = if let Some(file_path) = source.file {
+            // File source
+            println!("Source: File ({})", file_path);
+            let audio_source = FileSource::new(file_path);
+            audio_source.start(pcm_tx)
+        } else {
+            #[cfg(feature = "live-input")]
+            if let Some(device_name) = source.input {
+                // Live input source
+                println!("Source: Live Input ({})", device_name);
+                let audio_source = LiveSource::new(Some(device_name));
+                audio_source.start(pcm_tx)
+            } else {
+                Err(anyhow::anyhow!("No audio source specified"))
+            }
+
+            #[cfg(not(feature = "live-input"))]
+            Err(anyhow::anyhow!("No audio source specified"))
+        };
+
+        if let Err(e) = result {
             eprintln!("[Audio] Error: {}", e);
         }
     });
@@ -86,7 +132,6 @@ async fn broadcast_station(name: String, file_path: String) -> anyhow::Result<()
 
     println!("Node ID: {}", node_id);
     println!("Station: {}", name);
-    println!("File: {}", file_path);
     println!("\nWaiting for listeners...\n");
 
     // Build server

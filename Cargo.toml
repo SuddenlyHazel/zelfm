@@ -16,8 +16,9 @@ tokio = { version = "1.48", features = ["full", "sync"] }
 futures = "0.3"
 async-trait = "0.1"
 
-# Audio playback (optional)
+# Audio I/O (optional features)
 rodio = { version = "0.21", optional = true }
+cpal = { version = "0.15", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -32,3 +33,4 @@ log = "0.4"
 [features]
 default = []
 playback = ["rodio"]
+live-input = ["cpal"]
