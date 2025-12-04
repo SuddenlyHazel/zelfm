@@ -31,6 +31,6 @@ anyhow = "1.0"
 log = "0.4"
 
 [features]
-default = []
+default = ["playback", "live-input"]
 playback = ["rodio"]
 live-input = ["cpal"]

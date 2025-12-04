@@ -221,10 +221,19 @@ impl AudioSource for LiveSource {
 
         println!("[Live] Streaming... (Press Ctrl+C to stop)");
 
-        // Keep stream alive
-        std::mem::forget(stream);
+        // Keep stream alive by moving it into the loop
+        // Process exit will clean it up
         loop {
-            std::thread::park();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Stream is kept alive by this loop
+            // When main thread exits (Ctrl+C), this thread is terminated
+        }
+
+        #[allow(unreachable_code)]
+        {
+            drop(stream);
+            Ok(())
         }
     }
 }
