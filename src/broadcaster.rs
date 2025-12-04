@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use log::{error, info};
+use log::{error, info, warn};
 use std::num::{NonZeroU32, NonZeroU8};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -7,6 +7,7 @@ use std::sync::{
 };
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
+use tokio::time::{timeout, Duration};
 use vorbis_rs::{VorbisBitrateManagementStrategy, VorbisEncoderBuilder};
 
 use crate::service::{RadioServiceServer, StationInfo};
@@ -166,11 +167,26 @@ impl RadioServiceServer for RadioBroadcaster {
             Ok::<_, String>(())
         });
 
-        // Send encoded OGG chunks to client
+        // Send encoded OGG chunks to client with stall detection
+        const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
         while let Some(chunk) = ogg_rx.recv().await {
-            if let Err(e) = send.write_all(&chunk).await {
-                error!("Send error to listener {}: {}", listener_id, e);
-                break;
+            match timeout(SEND_TIMEOUT, send.write_all(&chunk)).await {
+                Ok(Ok(())) => {
+                    // Successfully sent chunk
+                }
+                Ok(Err(e)) => {
+                    error!("Send error to listener {}: {}", listener_id, e);
+                    break;
+                }
+                Err(_) => {
+                    warn!(
+                        "Listener {} stalled (no progress for {} seconds), disconnecting",
+                        listener_id,
+                        SEND_TIMEOUT.as_secs()
+                    );
+                    break;
+                }
             }
         }
 
