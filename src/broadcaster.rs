@@ -92,7 +92,13 @@ impl RadioServiceServer for RadioBroadcaster {
                     if self.buffer.len() >= 8192 {
                         let chunk = self.buffer.clone();
                         self.buffer.clear();
-                        let _ = self.tx.blocking_send(chunk);
+                        // If send fails, listener disconnected - return error to stop encoder
+                        self.tx.blocking_send(chunk).map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "Listener disconnected",
+                            )
+                        })?;
                     }
                     Ok(buf.len())
                 }
@@ -101,7 +107,13 @@ impl RadioServiceServer for RadioBroadcaster {
                     if !self.buffer.is_empty() {
                         let chunk = self.buffer.clone();
                         self.buffer.clear();
-                        let _ = self.tx.blocking_send(chunk);
+                        // If send fails, listener disconnected - return error to stop encoder
+                        self.tx.blocking_send(chunk).map_err(|_| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "Listener disconnected",
+                            )
+                        })?;
                     }
                     Ok(())
                 }

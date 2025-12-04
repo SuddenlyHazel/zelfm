@@ -37,7 +37,8 @@ impl RadioListener {
         info!("[Listener] Stream opened, buffering OGG data...");
 
         // Spawn a task to collect streaming data
-        let (data_tx, data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+        // Small buffer (10 chunks = ~80KB = ~5 seconds at 128kbps) for responsive shutdown
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10);
 
         let recv_task = tokio::spawn(async move {
             let mut chunk = vec![0u8; 8192];
