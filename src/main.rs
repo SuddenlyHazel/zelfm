@@ -99,6 +99,9 @@ async fn broadcast_station(name: String, source: AudioSourceArgs) -> anyhow::Res
         2,     // Target: Stereo
     );
 
+    // Keep a clone to drop on shutdown
+    let pcm_tx_shutdown = pcm_tx.clone();
+
     // Determine and start audio source
     std::thread::spawn(move || {
         let result = if let Some(file_path) = source.file {
@@ -144,6 +147,10 @@ async fn broadcast_station(name: String, source: AudioSourceArgs) -> anyhow::Res
     // Run until Ctrl+C
     tokio::signal::ctrl_c().await?;
     println!("\nShutting down...");
+
+    // Drop the broadcast sender to signal audio thread to stop
+    drop(pcm_tx_shutdown);
+
     server_bundle.shutdown(Duration::from_secs(1)).await?;
 
     Ok(())

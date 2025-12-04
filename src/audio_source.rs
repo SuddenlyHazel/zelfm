@@ -43,6 +43,12 @@ fn file_decode_loop(
     use symphonia::core::probe::Hint;
 
     loop {
+        // Check if channel is closed (no receivers = shutdown)
+        if pcm_tx.receiver_count() == 0 {
+            info!("[File] No listeners, shutting down...");
+            break;
+        }
+
         info!("[File] Decoding: {}", file_path.display());
 
         match decode_file_once(file_path, &pcm_tx) {
@@ -53,6 +59,8 @@ fn file_decode_loop(
             }
         }
     }
+
+    Ok(())
 }
 
 fn decode_file_once(
@@ -109,6 +117,12 @@ fn decode_file_once(
     let mut audio_spec = None;
 
     loop {
+        // Check for shutdown every iteration
+        if pcm_tx.receiver_count() == 0 {
+            info!("[File] No listeners, stopping decode");
+            return Ok(());
+        }
+
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
