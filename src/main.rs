@@ -65,17 +65,17 @@ async fn broadcast_station(name: String, file_path: String) -> anyhow::Result<()
     println!("=== ZelFM Broadcaster ===\n");
 
     // Create broadcaster
-    let (broadcaster, ogg_tx) = RadioBroadcaster::new(
+    let (broadcaster, pcm_tx) = RadioBroadcaster::new(
         name.clone(),
         format!("Broadcasting {}", file_path),
         44100, // 44.1 kHz
         2,     // Stereo
     );
 
-    // Start encoder thread
+    // Start audio decoder thread
     let file_clone = file_path.clone();
     std::thread::spawn(move || {
-        if let Err(e) = audio_source::audio_encode_loop(&file_clone, 44100, 2, ogg_tx) {
+        if let Err(e) = audio_source::audio_decode_loop(&file_clone, pcm_tx) {
             eprintln!("[Audio] Error: {}", e);
         }
     });
