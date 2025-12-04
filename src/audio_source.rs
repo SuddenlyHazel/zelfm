@@ -164,11 +164,8 @@ fn decode_file_once(
                 planar[i % num_channels].push(sample);
             }
 
-            // Check if send fails (channel closed = shutdown)
-            if pcm_tx.send(planar).is_err() {
-                info!("[File] Channel closed during decode");
-                return Ok(false);
-            }
+            // Send to broadcast channel - it's OK if there are zero receivers
+            let _ = pcm_tx.send(planar);
         }
     }
 
