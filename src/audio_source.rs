@@ -1,5 +1,6 @@
 use log::{error, info};
 use std::fs::File;
+use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::path::Path;
 use tokio::sync::broadcast;
@@ -12,6 +13,56 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+
+/// Custom Write implementation that broadcasts chunks to listeners
+struct BroadcastWriter {
+    tx: broadcast::Sender<Vec<u8>>,
+    buffer: Vec<u8>,
+    chunk_size: usize,
+}
+
+impl BroadcastWriter {
+    fn new(tx: broadcast::Sender<Vec<u8>>) -> Self {
+        Self {
+            tx,
+            buffer: Vec::new(),
+            chunk_size: 8192,
+        }
+    }
+
+    fn flush_if_needed(&mut self) -> std::io::Result<()> {
+        if self.buffer.len() >= self.chunk_size {
+            let chunk = self.buffer.clone();
+            self.buffer.clear();
+            // Ignore broadcast errors (no listeners)
+            let _ = self.tx.send(chunk);
+        }
+        Ok(())
+    }
+}
+
+impl Write for BroadcastWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        self.flush_if_needed()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buffer.is_empty() {
+            let chunk = self.buffer.clone();
+            self.buffer.clear();
+            let _ = self.tx.send(chunk);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for BroadcastWriter {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
 
 /// Runs the audio pipeline: Decode any format → Encode to Vorbis → Broadcast bytes
 pub fn audio_encode_loop(
@@ -26,7 +77,7 @@ pub fn audio_encode_loop(
         // Decode source file using symphonia
         match decode_and_stream(&file_path, sample_rate, channels, &ogg_tx) {
             Ok(_) => {
-                info!("[Audio] Looping...");
+                info!("[Audio] File complete, looping...");
             }
             Err(e) => {
                 error!("[Audio] Error: {}", e);
@@ -91,6 +142,18 @@ fn decode_and_stream(
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut spec = None;
 
+    // Create encoder that writes directly to broadcast writer
+    let broadcast_writer = BroadcastWriter::new(ogg_tx.clone());
+    let mut encoder = VorbisEncoderBuilder::new(
+        NonZeroU32::new(target_sample_rate).unwrap(),
+        NonZeroU8::new(target_channels).unwrap(),
+        broadcast_writer,
+    )?
+    .bitrate_management_strategy(VorbisBitrateManagementStrategy::QualityVbr {
+        target_quality: 0.5,
+    })
+    .build()?;
+
     // Decode all packets
     loop {
         // Get the next packet
@@ -144,41 +207,13 @@ fn decode_and_stream(
                 planar.push(vec![0.0; frames]);
             }
 
-            // Encode and broadcast
-            encode_and_broadcast(&planar, target_sample_rate, target_channels, ogg_tx)?;
+            // Encode this block - broadcasts automatically via BroadcastWriter
+            encoder.encode_audio_block(&planar)?;
         }
     }
 
-    Ok(())
-}
-
-fn encode_and_broadcast(
-    pcm_samples: &[Vec<f32>],
-    sample_rate: u32,
-    channels: u8,
-    ogg_tx: &broadcast::Sender<Vec<u8>>,
-) -> anyhow::Result<()> {
-    // Create encoder for this block
-    let mut ogg_buffer = Vec::new();
-    let mut encoder = VorbisEncoderBuilder::new(
-        NonZeroU32::new(sample_rate).unwrap(),
-        NonZeroU8::new(channels).unwrap(),
-        &mut ogg_buffer,
-    )?
-    .bitrate_management_strategy(VorbisBitrateManagementStrategy::QualityVbr {
-        target_quality: 0.5,
-    })
-    .build()?;
-
-    // Encode the block
-    encoder.encode_audio_block(pcm_samples)?;
+    // Finish encoder - flushes final data
     encoder.finish()?;
-
-    // Broadcast OGG bytes to all listeners
-    if !ogg_buffer.is_empty() {
-        // Ignore "channel closed" errors - happens when no listeners connected
-        let _ = ogg_tx.send(ogg_buffer);
-    }
 
     Ok(())
 }
