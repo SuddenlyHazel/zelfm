@@ -1,6 +1,5 @@
 use log::info;
-use std::io::{Cursor, Read};
-use std::sync::{Arc, Mutex};
+use std::io::Cursor;
 use vorbis_rs::VorbisDecoder;
 
 use crate::service::RadioServiceClient;
@@ -33,91 +32,124 @@ impl RadioListener {
     pub async fn listen(&self, duration_secs: Option<u64>) -> anyhow::Result<()> {
         info!("[Listener] Connecting...");
 
-        let (_send, recv) = self.client.listen().await?;
+        let (_send, mut recv) = self.client.listen().await?;
 
-        info!("[Listener] Stream opened, creating async reader...");
+        info!("[Listener] Stream opened, buffering OGG data...");
 
-        // Create a bridge between async RecvStream and sync Read for VorbisDecoder
-        let recv_wrapper = Arc::new(Mutex::new(recv));
-        let sync_reader = SyncStreamReader::new(recv_wrapper);
+        // Spawn a task to collect streaming data
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
 
-        // Create decoder with the sync reader
-        let mut decoder = VorbisDecoder::new(sync_reader)?;
+        let recv_task = tokio::spawn(async move {
+            let mut chunk = vec![0u8; 8192];
+            loop {
+                match recv.read(&mut chunk).await {
+                    Ok(Some(n)) => {
+                        if data_tx.send(chunk[..n].to_vec()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+        });
 
-        let sample_rate = decoder.sampling_frequency().get();
-        let channels = decoder.channels().get();
-        info!("[Listener] Format: {} Hz, {} ch", sample_rate, channels);
+        // Decode and play in blocking task
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            // Create a streaming reader that pulls from the channel
+            struct ChannelReader {
+                rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+                buffer: Vec<u8>,
+                position: usize,
+            }
 
-        #[cfg(feature = "playback")]
-        {
-            let mut player = AudioPlayer::new(sample_rate, channels)?;
-            info!("[Listener] Playing...");
-
-            let start = std::time::Instant::now();
-
-            // Decode and play
-            while let Some(samples) = decoder.decode_audio_block()? {
-                player.play_samples(samples.samples())?;
-
-                if let Some(max) = duration_secs {
-                    if start.elapsed().as_secs() >= max {
-                        break;
+            impl ChannelReader {
+                fn new(rx: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Self {
+                    Self {
+                        rx,
+                        buffer: Vec::new(),
+                        position: 0,
                     }
                 }
             }
 
-            player.finish();
-        }
+            impl std::io::Read for ChannelReader {
+                fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                    // Fill from current buffer first
+                    if self.position < self.buffer.len() {
+                        let available = self.buffer.len() - self.position;
+                        let to_copy = available.min(buf.len());
+                        buf[..to_copy]
+                            .copy_from_slice(&self.buffer[self.position..self.position + to_copy]);
+                        self.position += to_copy;
+                        return Ok(to_copy);
+                    }
 
-        #[cfg(not(feature = "playback"))]
-        {
-            info!("[Listener] Playback disabled, counting samples...");
-
-            let mut total_samples = 0;
-            let start = std::time::Instant::now();
-
-            while let Some(samples) = decoder.decode_audio_block()? {
-                total_samples += samples.samples()[0].len();
-
-                if let Some(max) = duration_secs {
-                    if start.elapsed().as_secs() >= max {
-                        break;
+                    // Need more data from channel
+                    match self.rx.blocking_recv() {
+                        Some(chunk) => {
+                            self.buffer = chunk;
+                            self.position = 0;
+                            self.read(buf) // Try again with new buffer
+                        }
+                        None => Ok(0), // EOF
                     }
                 }
             }
 
-            info!("[Listener] Processed {} samples", total_samples);
-        }
+            let reader = ChannelReader::new(data_rx);
+            let mut decoder = VorbisDecoder::new(reader)?;
 
-        Ok(())
-    }
-}
+            let sample_rate = decoder.sampling_frequency().get();
+            let channels = decoder.channels().get();
+            info!("[Listener] Format: {} Hz, {} ch", sample_rate, channels);
 
-/// Bridges async RecvStream to sync Read for VorbisDecoder
-struct SyncStreamReader {
-    recv: Arc<Mutex<iroh::endpoint::RecvStream>>,
-    runtime: tokio::runtime::Handle,
-}
+            #[cfg(feature = "playback")]
+            {
+                let mut player = AudioPlayer::new(sample_rate, channels)?;
+                info!("[Listener] Playing...");
 
-impl SyncStreamReader {
-    fn new(recv: Arc<Mutex<iroh::endpoint::RecvStream>>) -> Self {
-        Self {
-            recv,
-            runtime: tokio::runtime::Handle::current(),
-        }
-    }
-}
+                let start = std::time::Instant::now();
 
-impl Read for SyncStreamReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        // Block on async read
-        self.runtime.block_on(async {
-            let mut recv = self.recv.lock().unwrap();
-            match recv.read(buf).await {
-                Ok(Some(n)) => Ok(n),
-                Ok(None) => Ok(0), // EOF
-                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+                while let Some(samples) = decoder.decode_audio_block()? {
+                    player.play_samples(samples.samples())?;
+
+                    if let Some(max) = duration_secs {
+                        if start.elapsed().as_secs() >= max {
+                            break;
+                        }
+                    }
+                }
+
+                player.finish();
             }
+
+            #[cfg(not(feature = "playback"))]
+            {
+                info!("[Listener] Playback disabled, counting samples...");
+
+                let mut total_samples = 0;
+                let start = std::time::Instant::now();
+
+                while let Some(samples) = decoder.decode_audio_block()? {
+                    total_samples += samples.samples()[0].len();
+
+                    if let Some(max) = duration_secs {
+                        if start.elapsed().as_secs() >= max {
+                            break;
+                        }
+                    }
+                }
+
+                info!("[Listener] Processed {} samples", total_samples);
+            }
+
+            Ok(())
         })
+        .await??;
+
+        recv_task.abort();
+
+        Ok(result)
     }
 }
