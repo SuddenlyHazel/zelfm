@@ -14,8 +14,16 @@ pub struct StationInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub listener_id: usize,
+    pub nickname: Option<String>,
     pub message: String,
     pub timestamp: u64,
+}
+
+/// Connection-level extension to track listener identity
+#[derive(Debug, Clone)]
+pub struct ListenerInfo {
+    pub id: usize,
+    pub nickname: Option<String>,
 }
 
 #[zel_service(name = "radio")]

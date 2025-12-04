@@ -2,7 +2,10 @@ use clap::{Args, Parser, Subcommand};
 use log::info;
 use std::time::Duration;
 
-use zel_core::protocol::RpcServerBuilder;
+use futures::future::BoxFuture;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use zel_core::protocol::{Extensions, RpcServerBuilder};
 use zel_core::IrohBundle;
 
 mod audio_player;
@@ -15,7 +18,7 @@ mod service;
 use audio_source::{AudioSource, FileSource};
 use broadcaster::RadioBroadcaster;
 use listener::RadioListener;
-use service::{RadioServiceClient, RadioServiceServer};
+use service::{ListenerInfo, RadioServiceClient, RadioServiceServer};
 
 #[cfg(feature = "live-input")]
 use audio_source::LiveSource;
@@ -137,9 +140,21 @@ async fn broadcast_station(name: String, source: AudioSourceArgs) -> anyhow::Res
     println!("Station: {}", name);
     println!("\nWaiting for listeners...\n");
 
-    // Build server
-    let server =
-        RpcServerBuilder::new(b"zelfm/1", server_bundle.endpoint().clone()).service("radio");
+    // Connection hook to assign unique listener IDs
+    let listener_id_counter = Arc::new(AtomicUsize::new(0));
+
+    // Build server with connection hook
+    let server = RpcServerBuilder::new(b"zelfm/1", server_bundle.endpoint().clone())
+        .with_connection_hook(move |_conn, _server_ext| {
+            let counter = listener_id_counter.clone();
+            Box::pin(async move {
+                let id = counter.fetch_add(1, Ordering::Relaxed);
+                info!("[Server] Assigned listener ID: {}", id);
+
+                Ok(Extensions::new().with(ListenerInfo { id, nickname: None }))
+            })
+        })
+        .service("radio");
 
     let server = broadcaster.into_service_builder(server).build().build();
     let server_bundle = server_bundle.accept(b"zelfm/1", server).finish().await;
@@ -186,7 +201,10 @@ async fn listen_to_station(node_id_str: String, duration: Option<u64>) -> anyhow
         while let Some(result) = chat_stream.next().await {
             match result {
                 Ok(chat) => {
-                    println!("\r[Listener {}]: {}", chat.listener_id, chat.message);
+                    let display_name = chat
+                        .nickname
+                        .unwrap_or_else(|| format!("Listener {}", chat.listener_id));
+                    println!("\r[{}]: {}", display_name, chat.message);
                     print!("> ");
                     use std::io::Write;
                     let _ = std::io::stdout().flush();

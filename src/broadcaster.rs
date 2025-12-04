@@ -67,11 +67,18 @@ impl RadioServiceServer for RadioBroadcaster {
         })
     }
 
-    async fn send_chat(&self, _ctx: RequestContext, message: String) -> Result<(), String> {
+    async fn send_chat(&self, ctx: RequestContext, message: String) -> Result<(), String> {
         use std::time::SystemTime;
 
+        // Get listener info from connection extensions
+        let listener_info = ctx
+            .connection_extensions()
+            .get::<crate::service::ListenerInfo>()
+            .ok_or("Listener info not found")?;
+
         let chat = ChatMessage {
-            listener_id: self.listener_count.load(Ordering::Relaxed),
+            listener_id: listener_info.id,
+            nickname: listener_info.nickname.clone(),
             message,
             timestamp: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
